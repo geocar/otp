@@ -1263,7 +1263,7 @@ handle_call(_, _, #state{chunk = true} = State) ->
 %% really bad code that violates the API.
 handle_call(Request, _Timeout, State) ->
     {stop, {'API_violation_connection_closed', Request},
-     {error, {connection_terminated, 'API_violation'}}, State}.
+    {error, {connection_terminated, 'API_violation'}}, State}.
 
 %%--------------------------------------------------------------------------
 %% handle_cast(Request, State) -> {noreply, State} | 
@@ -1286,7 +1286,7 @@ handle_cast({Pid, close}, State) ->
 %% Catch all -  This can oly happen if the application programmer writes 
 %% really bad code that violates the API.
 handle_cast(Msg, State) ->
-  {stop, {'API_violation_connection_closed', Msg}, State}.
+    {stop, {'API_violation_connection_closed', Msg}, State}.
 
 %%--------------------------------------------------------------------------
 %% handle_info(Msg, State) -> {noreply, State} | {noreply, State, Timeout} |
@@ -1599,7 +1599,7 @@ handle_ctrl_result({tls_upgrade, _}, #state{csock = {tcp, Socket},
 	    activate_ctrl_connection(State),
 	    {noreply, State#state{tls_upgrading_data_connection = {true, pbsz}} };
 	{error, _} = Error ->
-	    gen_server:reply(From,  {Error, self()}),
+	    gen_server:reply(From, Error),
 	    {stop, normal, State0#state{client = undefined, 
 					caller = undefined,
 					tls_upgrading_data_connection = false}}
@@ -1657,7 +1657,7 @@ handle_ctrl_result({pos_compl, Lines},
 	    handle_caller(State#state{caller = Caller, dsock = {tcp, Socket}});
 	{error, _Reason} = Error ->
 	    gen_server:reply(From, Error),
-	    {noreply, State#state{client = undefined, caller = undefined}}
+	    {noreply, State#state{caller = undefined}}
     end;
 
 handle_ctrl_result({pos_compl, Lines}, 
@@ -1685,7 +1685,7 @@ handle_ctrl_result({pos_compl, Lines},
 	    handle_caller(State#state{caller = Caller, dsock = {tcp,Socket}});
 	{error, _Reason} = Error ->
 	    gen_server:reply(From, Error),
-	    {noreply,State#state{client = undefined, caller = undefined}}
+	    {noreply,State#state{caller = undefined}}
     end;
 
 handle_ctrl_result({pos_compl, Lines}, 
@@ -1707,7 +1707,7 @@ handle_ctrl_result({pos_compl, Lines},
 		    handle_caller(State#state{caller = Caller, dsock = {tcp, Socket}});
 		{error, _Reason} = Error ->
 		    gen_server:reply(From, Error),
-		    {noreply, State#state{client = undefined, caller = undefined}}
+		    {noreply, State#state{caller = undefined}}
     end;
    
 
@@ -1751,13 +1751,14 @@ handle_ctrl_result({pos_prel, _}, #state{caller = {dir, Dir}} = State0) ->
 	{ok, State1} ->
 	    State = activate_data_connection(State1),
 	    {noreply, State#state{caller = {handle_dir_result, Dir}}};
-	{error, _Reason} = ERROR ->
+	{error, _Reason} = Error ->
 	    case State0#state.client of
 		undefined ->
-		    {stop, ERROR, State0};
+		    {stop, Error, State0};
 		From ->
-		    gen_server:reply(From, ERROR),
-		    {stop, normal, State0#state{client = undefined}}
+	            activate_ctrl_connection(State0),
+		    gen_server:reply(From, Error),
+		    {noreply, State0#state{caller = undefined}}
 	    end
     end;
 
@@ -1860,13 +1861,14 @@ handle_ctrl_result({pos_prel, _}, #state{caller = recv_bin} = State0) ->
 	{ok, State1} ->
 	    State = activate_data_connection(State1),
 	    {noreply, State};
-	{error, _Reason} = ERROR ->
+	{error, _Reason} = Error ->
 	    case State0#state.client of
 		undefined ->
-		    {stop, ERROR, State0};
+		    {stop, Error, State0};
 		From ->
-		    gen_server:reply(From, ERROR),
-		    {stop, normal, State0#state{client = undefined}}
+	            activate_ctrl_connection(State0),
+		    gen_server:reply(From, Error),
+		    {noreply, State0#state{caller = undefined}}
 	    end
     end;
 
@@ -1894,13 +1896,14 @@ handle_ctrl_result({pos_prel, _}, #state{client = From,
 	{ok, State1} ->
 	    State = start_chunk(State1),
 	    {noreply, State};
-	{error, _Reason} = ERROR ->
+	{error, _Reason} = Error ->
 	    case State0#state.client of
 		undefined ->
-		    {stop, ERROR, State0};
+		    {stop, Error, State0};
 		From ->
-		    gen_server:reply(From, ERROR),
-		    {stop, normal, State0#state{client = undefined}}
+	            activate_ctrl_connection(State0),
+		    gen_server:reply(From, Error),
+		    {noreply, State0#state{caller = undefined}}
 	    end
     end;
 
@@ -1935,13 +1938,14 @@ handle_ctrl_result({pos_prel, _}, #state{caller = {recv_file, _}} = State0) ->
 	{ok, State1} ->
 	    State = activate_data_connection(State1),
 	    {noreply, State};
-	{error, _Reason} = ERROR ->
+	{error, _Reason} = Error ->
 	    case State0#state.client of
 		undefined ->
-		    {stop, ERROR, State0};
+		    {stop, Error, State0};
 		From ->
-		    gen_server:reply(From, ERROR),
-		    {stop, normal, State0#state{client = undefined}}
+	            activate_ctrl_connection(State0),
+		    gen_server:reply(From, Error),
+		    {noreply, State0#state{caller = undefined}}
 	    end
     end;
 
@@ -1957,13 +1961,14 @@ handle_ctrl_result({pos_prel, _}, #state{caller = {transfer_file, Fd}}
     case accept_data_connection(State0) of
 	{ok, State1} ->
 	    send_file(State1, Fd); 
-	{error, _Reason} = ERROR ->
+	{error, _Reason} = Error ->
 	    case State0#state.client of
 		undefined ->
-		    {stop, ERROR, State0};
+		    {stop, Error, State0};
 		From ->
-		    gen_server:reply(From, ERROR),
-		    {stop, normal, State0#state{client = undefined}}
+	            activate_ctrl_connection(State0),
+		    gen_server:reply(From, Error),
+		    {noreply, State0#state{caller = undefined}}
 	    end
     end;
 
@@ -1972,13 +1977,14 @@ handle_ctrl_result({pos_prel, _}, #state{caller = {transfer_data, Bin}}
     case accept_data_connection(State0) of
 	{ok, State} ->
 	    send_bin(State, Bin);
-	{error, _Reason} = ERROR ->
+	{error, _Reason} = Error ->
 	    case State0#state.client of
 		undefined ->
-		    {stop, ERROR, State0};
+		    {stop, Error, State0};
 		From ->
-		    gen_server:reply(From, ERROR),
-		    {stop, normal, State0#state{client = undefined}}
+	            activate_ctrl_connection(State0),
+		    gen_server:reply(From, Error),
+		    {noreply, State0#state{caller = undefined}}
 	    end
     end;
 
@@ -2005,12 +2011,11 @@ ctrl_result_response(Status, #state{client = From} = State, _)
        (Status =:= efnamena) orelse 
        (Status =:= econn) ->
     gen_server:reply(From, {error, Status}),
-%%    {stop, normal, {error, Status}, State#state{client = undefined}};
     {stop, normal, State#state{client = undefined}};
 
 ctrl_result_response(_, #state{client = From} = State, ErrorMsg) ->
     gen_server:reply(From, ErrorMsg),
-    {noreply, State#state{client = undefined, caller = undefined}}.
+    {noreply, State#state{caller = undefined}}.
 
 %%--------------------------------------------------------------------------
 handle_caller(#state{caller = {dir, Dir, Len}} = State) ->
