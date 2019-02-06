@@ -67,6 +67,7 @@
 
 %% Internal Constants
 -define(FTP_PORT, 21).
+-define(FTPS_PORT, 990).
 -define(FILE_BUFSIZE, 4096).
 
 
@@ -106,6 +107,7 @@
           sockopts_data_active = [],
 	  progress = ignore,   % ignore | pid()	    
 	  dtimeout = ?DATA_ACCEPT_TIMEOUT,  % non_neg_integer() | infinity
+	  tls_upgrading_ctrl_connection = false,
 	  tls_upgrading_data_connection = false,
 	  ftp_extension = ?FTP_EXT_DEFAULT
 	 }).
@@ -236,7 +238,7 @@ open(Host, Opts) when is_list(Opts) ->
 	{ok, SocketOptions}  = socket_options(Opts),
 	case start_link(StartOptions, []) of
 	    {ok, Pid} ->
-		do_open(Pid, OpenOptions, SocketOptions, tls_options(Opts));
+		call(Pid, {open, ip_comm, OpenOptions, SocketOptions}, plain);
 	    Error1 ->
 		Error1
 	end
@@ -245,13 +247,6 @@ open(Host, Opts) when is_list(Opts) ->
 	    Error2
     end.
 
-do_open(Pid, OpenOptions, SocketOptions, TLSOpts) ->
-    case call(Pid, {open, ip_comm, OpenOptions, SocketOptions}, plain) of
-	{ok, Pid} ->
-	    maybe_tls_upgrade(Pid, TLSOpts);
-	Error ->
-	    Error
-    end.
 %%--------------------------------------------------------------------------
 %% user(Pid, User, Pass, <Acc>) -> ok | {error, euser} | {error, econn} 
 %%                                    | {error, eacct}
@@ -1038,12 +1033,15 @@ handle_call({_, {open, ip_comm, Opts, {CtrlOpts, DataPassOpts, DataActOpts}}}, F
 	undefined ->
 	    {stop, normal, {error, ehost}, State};
 	Host ->
-	    Mode     = key_search(mode,     Opts, ?DEFAULT_MODE),
-	    Port     = key_search(port,     Opts, ?FTP_PORT), 
-	    Timeout  = key_search(timeout,  Opts, ?CONNECTION_TIMEOUT),
-	    DTimeout = key_search(dtimeout, Opts, ?DATA_ACCEPT_TIMEOUT),
-	    Progress = key_search(progress, Opts, ignore),
-	    IpFamily = key_search(ipfamily, Opts, inet),
+	    TLSOpts  = key_search(tls,            Opts, undefined),
+	    Method   = key_search(tls_sec_method, Opts, ftpes),
+	    Mode     = key_search(mode,           Opts, ?DEFAULT_MODE),
+	    Port0    = key_search(port,           Opts, 0),
+	    Port     = if Port0 == 0, Method == ftps -> ?FTPS_PORT; Port0 == 0 -> ?FTP_PORT; true -> Port0 end,
+	    Timeout  = key_search(timeout,        Opts, ?CONNECTION_TIMEOUT),
+	    DTimeout = key_search(dtimeout,       Opts, ?DATA_ACCEPT_TIMEOUT),
+	    Progress = key_search(progress,       Opts, ignore),
+	    IpFamily = key_search(ipfamily,       Opts, inet),
 	    FtpExt   = key_search(ftp_extension, Opts, ?FTP_EXT_DEFAULT),
 
 	    State2 = State#state{client   = From, 
@@ -1053,10 +1051,15 @@ handle_call({_, {open, ip_comm, Opts, {CtrlOpts, DataPassOpts, DataActOpts}}}, F
                                  sockopts_ctrl = CtrlOpts,
                                  sockopts_data_passive =  DataPassOpts,
                                  sockopts_data_active = DataActOpts,
+                                 tls_options = TLSOpts,
 				 dtimeout = DTimeout,
 				 ftp_extension = FtpExt}, 
 
 	    case setup_ctrl_connection(Host, Port, Timeout, State2) of
+		{ok, State3, WaitTimeout} when is_list(TLSOpts), Method == ftps ->
+		    handle_ctrl_result({tls_upgrade, []}, State3#state{ timeout = WaitTimeout });
+		{ok, State3, WaitTimeout} when is_list(TLSOpts) ->
+		    {noreply, State3#state{tls_upgrading_ctrl_connection = pending}, WaitTimeout};
 		{ok, State3, WaitTimeout} ->
 		    {noreply, State3, WaitTimeout};
 		{error, _Reason} ->
@@ -1064,11 +1067,6 @@ handle_call({_, {open, ip_comm, Opts, {CtrlOpts, DataPassOpts, DataActOpts}}}, F
 		    {stop, normal, State2#state{client = undefined}}
 	    end
     end;	
-
-handle_call({_, {open, tls_upgrade, TLSOptions}}, From, State) ->
-    _ = send_ctrl_message(State, mk_cmd("AUTH TLS", [])), 
-    activate_ctrl_connection(State),
-    {noreply, State#state{client = From, caller = open, tls_options = TLSOptions}};
 
 handle_call({_, {user, User, Password}}, From, 
 	    #state{csock = CSock} = State) when (CSock =/= undefined) ->
@@ -1586,24 +1584,43 @@ handle_user_account(Acc, State) ->
 %%--------------------------------------------------------------------------
 %% handle_ctrl_result 
 %%--------------------------------------------------------------------------
-handle_ctrl_result({tls_upgrade, _}, #state{csock = {tcp, Socket},
+handle_ctrl_result(_Request, #state{csock = {tcp, _Socket},
+					     caller = open,
+					     timeout = Timeout,
+					     tls_upgrading_ctrl_connection = pending}
+		   = State) ->
+     _ = send_ctrl_message(State, mk_cmd("AUTH TLS", [])),
+    activate_ctrl_connection(State),
+    {noreply, State#state{tls_upgrading_ctrl_connection = true}, Timeout};
+
+handle_ctrl_result(Request = {tls_upgrade, _}, #state{csock = {tcp, Socket},
 					    tls_options = TLSOptions,
 					    timeout = Timeout,
 					    caller = open, client = From} 
 		   = State0) ->
     ?DBG('<--ctrl ssl:connect(~p, ~p)~n~p~n',[Socket,TLSOptions,State0]),
     case ssl:connect(Socket, TLSOptions, Timeout) of
+	{ok, TLSSocket} when State0#state.tls_upgrading_ctrl_connection == true ->
+	    handle_ctrl_result(Request, State0#state{csock = {ssl,TLSSocket},
+						     tls_upgrading_ctrl_connection = false,
+						     tls_upgrading_data_connection = true});
 	{ok, TLSSocket} ->
 	    State = State0#state{csock = {ssl,TLSSocket}},
-	    _ = send_ctrl_message(State, mk_cmd("PBSZ 0", [])),
 	    activate_ctrl_connection(State),
-	    {noreply, State#state{tls_upgrading_data_connection = {true, pbsz}} };
+	    {noreply, State#state{tls_upgrading_data_connection = true}};
 	{error, _} = Error ->
 	    gen_server:reply(From, Error),
 	    {stop, normal, State0#state{client = undefined, 
 					caller = undefined,
 					tls_upgrading_data_connection = false}}
-    end;	
+    end;
+
+handle_ctrl_result(_Request, #state{csock = {ssl, _Socket},
+				    tls_upgrading_data_connection = true}
+		  = State) ->
+    _ = send_ctrl_message(State, mk_cmd("PBSZ 0", [])),
+    activate_ctrl_connection(State),
+    {noreply, State#state{tls_upgrading_data_connection = {true, pbsz}}};
 
 handle_ctrl_result({pos_compl, _}, #state{tls_upgrading_data_connection = {true, pbsz}} = State) ->
     _ = send_ctrl_message(State, mk_cmd("PROT P", [])),
@@ -2419,12 +2436,6 @@ peername({ssl, Socket}) -> ssl:peername(Socket).
 sockname({tcp, Socket}) -> inet:sockname(Socket);
 sockname({ssl, Socket}) -> ssl:sockname(Socket).
 
-maybe_tls_upgrade(Pid, undefined) ->
-    {ok, Pid};
-maybe_tls_upgrade(Pid, TLSOptions) ->
-    catch ssl:start(),
-    call(Pid, {open, tls_upgrade, TLSOptions}, plain).
-
 start_chunk(#state{tls_upgrading_data_connection = {true, CTRL, _}} = State) ->
     State#state{tls_upgrading_data_connection = {true, CTRL, ?MODULE, start_chunk, undefined}};
 start_chunk(#state{client = From} = State) ->
@@ -2511,7 +2522,7 @@ open_options(Options) ->
 		false
 	end,
     ValidatePort = 
-	fun(Port) when is_integer(Port) andalso (Port > 0) -> true;
+	fun(Port) when is_integer(Port) andalso (Port >= 0) -> true;
 	   (_) -> false
 	end,
     ValidateIpFamily = 
@@ -2520,6 +2531,16 @@ open_options(Options) ->
 	   (inet6fb4) -> true;
 	   (_) -> false
 	end,
+    ValidateTLS = 
+	fun(TLS) when is_list(TLS) -> true;
+	   (_) -> false
+	end,
+    ValidateTLSSecMethod = 
+	fun(ftpes) -> true;
+	   (ftps) -> true;
+	   (_) -> false
+	end,
+
     ValidateTimeout = 
 	fun(Timeout) when is_integer(Timeout) andalso (Timeout >= 0) -> true;
 	   (_) -> false
@@ -2544,14 +2565,16 @@ open_options(Options) ->
 		(_) -> false
 	end,	
     ValidOptions = 
-	[{mode,     ValidateMode,     false, ?DEFAULT_MODE}, 
-	 {host,     ValidateHost,     true,  ehost},
-	 {port,     ValidatePort,     false, ?FTP_PORT},
-	 {ipfamily, ValidateIpFamily, false, inet},
-	 {timeout,  ValidateTimeout,  false, ?CONNECTION_TIMEOUT}, 
-	 {dtimeout, ValidateDTimeout, false, ?DATA_ACCEPT_TIMEOUT}, 
-	 {progress, ValidateProgress, false, ?PROGRESS_DEFAULT},
-	 {ftp_extension, ValidateFtpExtension, false, ?FTP_EXT_DEFAULT}], 
+	[{mode,           ValidateMode,         false, ?DEFAULT_MODE}, 
+	 {host,           ValidateHost,         true,  ehost},
+	 {port,           ValidatePort,         false, 0},
+	 {ipfamily,       ValidateIpFamily,     false, inet},
+	 {tls,            ValidateTLS,          false, undefined},
+	 {tls_sec_method, ValidateTLSSecMethod, false, ftpes},
+	 {timeout,        ValidateTimeout,      false, ?CONNECTION_TIMEOUT}, 
+	 {dtimeout,       ValidateDTimeout,     false, ?DATA_ACCEPT_TIMEOUT}, 
+	 {progress,       ValidateProgress,     false, ?PROGRESS_DEFAULT},
+	 {ftp_extension,  ValidateFtpExtension, false, ?FTP_EXT_DEFAULT}], 
     validate_options(Options, ValidOptions, []).
 
 socket_options(Options) ->
@@ -2579,10 +2602,6 @@ valid_socket_option({header,_}      ) -> false;
 valid_socket_option({packet_size,_} ) -> false;
 valid_socket_option(_) -> true.
 
-
-tls_options(Options) ->
-    %% Options will be validated by ssl application
-    proplists:get_value(tls, Options, undefined).
 
 validate_options([], [], Acc) ->
     {ok, lists:reverse(Acc)};
