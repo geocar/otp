@@ -2466,8 +2466,7 @@ session_handle_params(_, Session) ->
 handle_session(Role = server, #ssl_options{reuse_sessions = true} = SslOpts, 
                Host, Port, Session0) ->
     register_session(Role, host_id(Role, Host, SslOpts), Port, Session0, true);
-handle_session(Role = client, #ssl_options{verify = verify_peer,
-                                           reuse_sessions = Reuse} = SslOpts, 
+handle_session(Role = client, #ssl_options{reuse_sessions = Reuse} = SslOpts, 
                Host, Port, Session0) when Reuse =/= false ->
     register_session(Role, host_id(Role, Host, SslOpts), Port, Session0, reg_type(Reuse));
 handle_session(server, _, Host, Port, Session) ->
@@ -2516,7 +2515,12 @@ handle_resumed_session(SessId, #state{static_env = #static_env{host = Host,
                                       connection_states = ConnectionStates0,
 				      negotiated_version = Version
                                      } = State) ->
-    Session = CacheCb:lookup(Cache, {{Host, Port}, SessId}),
+    Session = case CacheCb:lookup(Cache, {{Host, Port}, SessId}) of
+        undefined ->
+	    hd(CacheCb:select_session(Cache, SessId));
+	S ->
+	    S
+    end,
     case ssl_handshake:master_secret(ssl:tls_version(Version), Session,
 				     ConnectionStates0, client) of
 	{_, ConnectionStates} ->

@@ -1362,7 +1362,8 @@ handle_options(Opts0, Role, Host) ->
 		   },
     LogLevel = handle_option(log_alert, Opts, true),
     SSLOptions = SSLOptions0#ssl_options{
-                   log_level = handle_option(log_level, Opts, LogLevel)
+                   log_level = handle_option(log_level, Opts, LogLevel),
+                   reuse_sessions = if is_binary(SSLOptions0#ssl_options.reuse_session) -> true; true -> SSLOptions0#ssl_options.reuse_sessions end
                   },
 
     CbInfo  = proplists:get_value(cb_info, Opts, default_cb_info(Protocol)),

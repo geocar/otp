@@ -54,13 +54,6 @@ is_new(_ClientSuggestion, _ServerDecision) ->
 %% Description: Should be called by the client side to get an id
 %%              for the client hello message.
 %%--------------------------------------------------------------------
-client_id({Host, Port, #ssl_options{reuse_session = SessionId}}, Cache, CacheCb, _) when is_binary(SessionId)->
-    case CacheCb:lookup(Cache, {{Host, Port}, SessionId}) of
-        undefined ->
-	    <<>>;
-	#session{} ->
-	    SessionId
-    end;
 client_id(ClientInfo, Cache, CacheCb, OwnCert) ->
     case select_session(ClientInfo, Cache, CacheCb, OwnCert) of
 	no_session ->
@@ -102,8 +95,16 @@ server_id(Port, SuggestedId, Options, Cert, Cache, CacheCb) ->
 select_session({_, _, #ssl_options{reuse_sessions = Reuse}}, _Cache, _CacheCb, _OwnCert) when Reuse =/= true ->
     %% If reuse_sessions == true | save a new session should be created
     no_session;
-select_session({HostIP, Port, SslOpts}, Cache, CacheCb, OwnCert) ->
-    Sessions = CacheCb:select_session(Cache, {HostIP, Port}),
+select_session({Host, Port, SslOpts = #ssl_options{reuse_session = SessId}}, Cache, CacheCb, OwnCert) when is_binary(SessId) ->
+    Sessions = case CacheCb:lookup(Cache, {{Host, Port}, SessId}) of
+        undefined ->
+	    CacheCb:select_session(Cache, SessId);
+	#session{} ->
+	    SessId
+    end,
+    select_session(Sessions, SslOpts, OwnCert);
+select_session({Host, Port, SslOpts}, Cache, CacheCb, OwnCert) ->
+    Sessions = CacheCb:select_session(Cache, {Host, Port}),
     select_session(Sessions, SslOpts, OwnCert).
 
 select_session([], _, _) ->

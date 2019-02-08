@@ -81,9 +81,12 @@ foldl(Fun, Acc0, Cache) ->
 %% Description: Selects a session that could be reused. Should be callable
 %% from any process.
 %%--------------------------------------------------------------------
-select_session(Cache, PartialKey) ->    
-    ets:select(Cache, 
-	       [{{{PartialKey,'_'}, '$1'},[],['$1']}]).
+select_session(Cache, HostPort) when is_tuple(HostPort) ->
+    ets:select(Cache,
+	       [{{{HostPort,'_'}, '$1'},[],['$1']}]);
+select_session(Cache, SessionId) when is_binary(SessionId) ->
+    ets:select(Cache,
+	       [{{{'_', SessionId}, '$1'},[],['$1']}]).
 
 %%--------------------------------------------------------------------
 %% Description: Returns the cache size
