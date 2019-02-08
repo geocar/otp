@@ -1599,7 +1599,7 @@ handle_ctrl_result(Request = {tls_upgrade, _}, #state{csock = {tcp, Socket},
 					    caller = open, client = From} 
 		   = State0) ->
     ?DBG('<--ctrl ssl:connect(~p, ~p)~n~p~n',[Socket,TLSOptions,State0]),
-    case ssl:connect(Socket, TLSOptions, Timeout) of
+    case ssl:connect(Socket, [{reuse_sessions,save}|TLSOptions], Timeout) of
 	{ok, TLSSocket} when State0#state.tls_upgrading_ctrl_connection == true ->
 	    handle_ctrl_result(Request, State0#state{csock = {ssl,TLSSocket},
 						     tls_upgrading_ctrl_connection = false,
@@ -2212,12 +2212,20 @@ connect2(Host, Port, IpFam, SockOpts, Timeout) ->
 
 accept_data_connection(#state{mode     = active,
 			      dtimeout = DTimeout, 
-			      tls_options = TLSOptions,
+			      tls_options = TLSOptions0,
+			      csock    = {CTrans,CSocket},
 			      dsock    = {lsock, LSock}} = State0) ->
     case gen_tcp:accept(LSock, DTimeout) of
-	{ok, Socket} when  is_list(TLSOptions) ->
+	{ok, Socket} when  is_list(TLSOptions0) ->
 	    gen_tcp:close(LSock),
-	    ?DBG('<--data ssl:connect(~p, ~p)~n~p~n',[Socket,TLSOptions,State0]),
+	    ?DBG('<--data ssl:connect(~p, ~p)~n~p~n',[Socket,TLSOptions0,State0]),
+	    TLSOptions = if
+		CTrans == ssl ->
+		    {ok, [{session_id,SessionId}]} = ssl:connection_information(CSocket, [session_id]),
+		    [{reuse_session,SessionId}|TLSOptions0];
+		true ->
+		    TLSOptions0
+	    end,
 	    case ssl:connect(Socket, TLSOptions, DTimeout) of
 		{ok, TLSSocket} ->
 		    {ok, State0#state{dsock={ssl,TLSSocket}}};
@@ -2233,9 +2241,17 @@ accept_data_connection(#state{mode     = active,
 
 accept_data_connection(#state{mode = passive,
 			      dtimeout = DTimeout,
+			      csock = {CTrans,CSocket},
 			      dsock = {tcp,Socket},
-			      tls_options = TLSOptions} = State) when is_list(TLSOptions) ->
-    ?DBG('<--data ssl:connect(~p, ~p)~n~p~n',[Socket,TLSOptions,State]),
+			      tls_options = TLSOptions0} = State) when is_list(TLSOptions0) ->
+    ?DBG('<--data ssl:connect(~p, ~p)~n~p~n',[Socket,TLSOptions0,State]),
+    TLSOptions = if
+	CTrans == ssl ->
+	    {ok, [{session_id,SessionId}]} = ssl:connection_information(CSocket, [session_id]),
+	    [{reuse_session,SessionId}|TLSOptions0];
+	true ->
+	    TLSOptions0
+    end,
     case ssl:connect(Socket, TLSOptions, DTimeout) of
 	{ok, TLSSocket} ->
 	    {ok, State#state{dsock={ssl,TLSSocket}}};
